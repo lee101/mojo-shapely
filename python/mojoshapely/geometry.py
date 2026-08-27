@@ -248,7 +248,7 @@ class LineString(BaseGeometry):
 
     @property
     def length(self):
-        return _lib.line_length(self._coords)
+        return _lib.line_length_buffer(self._coords)
 
     @property
     def wkt(self):
@@ -274,7 +274,7 @@ class LinearRing(LineString):
 
     @property
     def length(self):
-        return _lib.line_length(self._coords, closed=True)
+        return _lib.line_length_buffer(self._coords, closed=True)
 
     @property
     def wkt(self):
@@ -321,14 +321,14 @@ class Polygon(BaseGeometry):
     def area(self):
         if self.is_empty:
             return 0.0
-        return abs(_lib.ring_area(self._shell)) - sum(
-            abs(_lib.ring_area(hole)) for hole in self._holes
+        return abs(_lib.ring_area_buffer(self._shell)) - sum(
+            abs(_lib.ring_area_buffer(hole)) for hole in self._holes
         )
 
     @property
     def length(self):
-        return _lib.line_length(self._shell, True) + sum(
-            _lib.line_length(hole, True) for hole in self._holes
+        return _lib.line_length_buffer(self._shell, True) + sum(
+            _lib.line_length_buffer(hole, True) for hole in self._holes
         )
 
     @property

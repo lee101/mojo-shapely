@@ -80,9 +80,9 @@ All compute kernels live in one Mojo compilation unit. Python validates shapes,
 finiteness, dtypes, and contiguous layout before passing NumPy buffers across
 `ctypes` as integer addresses. The Python call frame keeps every buffer alive
 until Mojo returns. Coordinates are C-contiguous `float64` values in interleaved
-row-major layout (`x0, y0, x1, y1, ...`); ring offsets and intersection kind
-outputs are C-contiguous `int64` values. Mojo writes only into caller-allocated
-output buffers.
+row-major layout (`x0, y0, x1, y1, ...`); ring offsets are C-contiguous `int64`
+values and intersection kinds are compact `uint8` values. Mojo writes only into
+caller-allocated output buffers.
 
 Mojo performs orientation, point-on-segment, even/odd point-in-polygon,
 measurement, and all-pairs segment-intersection kernels. The Python topology
@@ -95,7 +95,9 @@ stay serial to avoid dispatch overhead. Polygon coordinate buffers are cached
 and passed across the FFI without a copy.
 
 There is no GPU path. The available kernels are branch-heavy streaming
-operations, and this project currently targets the CPU only.
+operations below roughly two floating-point operations per byte moved, so GPU
+transfer and launch overhead would outweigh useful work. The project therefore
+keeps these kernels on the CPU.
 
 ## Benchmarks
 
@@ -105,16 +107,17 @@ These are real results from this checkout:
 
 | Case | mojo-shapely | Shapely/GEOS | Relative |
 |---|---:|---:|---:|
-| contains_xy, 2M points | 63.165 ms | 203.500 ms | 3.22x faster |
-| LineString.length, 1k vertices | 0.016 ms | 0.009 ms | 0.55x slower |
-| Polygon.intersection, 256 vertices | 6.656 ms | 0.267 ms | 0.04x slower |
-| Polygon.union, 256 vertices | 7.096 ms | 0.114 ms | 0.02x slower |
+| contains_xy, 2M points | 28.318 ms | 189.012 ms | 6.67x faster |
+| LineString.length, 1k vertices | 0.006 ms | 0.008 ms | 1.35x faster |
+| Polygon.intersection, 256 vertices | 3.928 ms | 0.145 ms | 0.04x slower |
+| Polygon.union, 256 vertices | 4.302 ms | 0.091 ms | 0.02x slower |
 
-The SIMD and thresholded parallel point kernel is about three times faster than
-GEOS for the 2M-point case on this machine. The short length call is slower
-because its fixed Python/FFI cost dominates. Boolean operations are about 25
-and 62 times slower than GEOS in these two cases because they materialize an
-all-pairs intersection matrix and assemble topology in Python.
+The SIMD and thresholded parallel point kernel is about seven times faster than
+GEOS for the 2M-point case on this machine. Geometry-owned measurement and edge
+buffers cross the FFI without validation copies, and polygon edge layouts are
+cached in both AoS and SIMD-friendly SoA form. Boolean operations remain about
+27 and 47 times slower than GEOS in these cases because they still materialize
+an all-pairs intersection matrix and assemble topology in Python.
 
 ## Development
 

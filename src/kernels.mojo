@@ -2,10 +2,15 @@
 
 from std.math import sqrt
 from std.sys.info import simd_width_of
+from max.algorithm import sync_parallelize
 
 comptime Ptr = Pointer[Float64, AnyOrigin[mut=True]]
 comptime IntPtr = Pointer[Int64, AnyOrigin[mut=True]]
+comptime BytePtr = Pointer[UInt8, AnyOrigin[mut=True]]
 comptime W = simd_width_of[DType.float64]()
+comptime LOCATE_PARALLEL_WORK = 1 << 20
+comptime SEGMENT_PARALLEL_WORK = 1 << 18
+comptime PARALLEL_TASKS = 32
 
 
 def p(addr: Int) -> Ptr:
@@ -14,6 +19,10 @@ def p(addr: Int) -> Ptr:
 
 def ip(addr: Int) -> IntPtr:
     return IntPtr(unsafe_from_address=addr)
+
+
+def bp(addr: Int) -> BytePtr:
+    return BytePtr(unsafe_from_address=addr)
 
 
 def orient(
@@ -153,8 +162,20 @@ def msh_locate_points(
             locate_point_batch(coords, offsets, nrings, points, i * W),
         )
 
-    for i in range(batches):
-        locate_batch(i)
+    @__parameter
+    @__copy_capture(batches)
+    def locate_task(task: Int):
+        var task_count = min(PARALLEL_TASKS, batches)
+        var start = task * batches // task_count
+        var stop = (task + 1) * batches // task_count
+        for i in range(start, stop):
+            locate_batch(i)
+
+    if npoints * Int(offsets[unsafe_offset=nrings]) >= LOCATE_PARALLEL_WORK:
+        sync_parallelize[locate_task](min(PARALLEL_TASKS, batches))
+    else:
+        for i in range(batches):
+            locate_batch(i)
     for i in range(batches * W, npoints):
         dst[unsafe_offset=i] = Float64(
             locate_point(
@@ -242,7 +263,7 @@ def msh_segment_intersections(
     var b = p(b_addr)
     var ts = p(t_addr)
     var us = p(u_addr)
-    var kinds = ip(kind_addr)
+    var kinds = bp(kind_addr)
 
     @__parameter
     @__copy_capture(a, b, ts, us, kinds, nb)
@@ -276,6 +297,16 @@ def msh_segment_intersections(
                 | SIMD[DType.float64, W](max(ay, by)).lt(min(cy, dy))
                 | max(cy, dy).lt(SIMD[DType.float64, W](min(ay, by)))
             )
+            var any_bbox_hit = False
+            for lane in range(W):
+                if not Bool(bbox_miss[lane]):
+                    any_bbox_hit = True
+            if not any_bbox_hit:
+                ts.unsafe_store(k, zeros)
+                us.unsafe_store(k, zeros)
+                kinds.unsafe_store(k, SIMD[DType.uint8, W](0))
+                j += W
+                continue
             var nonparallel = abs(den).gt(eps)
             var collinear = abs(qpx * ry - qpy * rx).le(eps)
             var tv = (qpx * sy - qpy * sx) / den
@@ -293,9 +324,9 @@ def msh_segment_intersections(
             kinds.unsafe_store(
                 k,
                 hit.select(
-                    SIMD[DType.int64, W](1),
+                    SIMD[DType.uint8, W](1),
                     ((~bbox_miss) & (~nonparallel) & collinear).select(
-                        SIMD[DType.int64, W](2), SIMD[DType.int64, W](0)
+                        SIMD[DType.uint8, W](2), SIMD[DType.uint8, W](0)
                     ),
                 ),
             )
@@ -340,8 +371,20 @@ def msh_segment_intersections(
                 us[unsafe_offset=k] = min(1.0, max(0.0, uv))
                 kinds[unsafe_offset=k] = 1
 
-    for i in range(na):
-        intersect_row(i)
+    @__parameter
+    @__copy_capture(na)
+    def intersect_task(task: Int):
+        var task_count = min(PARALLEL_TASKS, na)
+        var start = task * na // task_count
+        var stop = (task + 1) * na // task_count
+        for i in range(start, stop):
+            intersect_row(i)
+
+    if na * nb >= SEGMENT_PARALLEL_WORK:
+        sync_parallelize[intersect_task](min(PARALLEL_TASKS, na))
+    else:
+        for i in range(na):
+            intersect_row(i)
 
 
 @export("msh_orient_batch")

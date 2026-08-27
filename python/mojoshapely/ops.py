@@ -31,7 +31,7 @@ def _rings(polygon: Polygon, oriented: bool = False) -> list[np.ndarray]:
         return rings
     result = []
     for index, ring in enumerate(rings):
-        area = _lib.ring_area(ring)
+        area = _lib.ring_area_buffer(ring)
         want_positive = index == 0
         result.append(ring if (area > 0) == want_positive else ring[::-1].copy())
     return result
@@ -51,6 +51,16 @@ def _segments_from_rings(rings: list[np.ndarray]) -> np.ndarray:
     return result
 
 
+def _polygon_segments(polygon: Polygon, oriented: bool = False):
+    name = "_oriented_segment_buffers" if oriented else "_segment_buffers"
+    cached = getattr(polygon, name, None)
+    if cached is None:
+        segments = _segments_from_rings(_rings(polygon, oriented=oriented))
+        cached = (segments, np.ascontiguousarray(segments.T))
+        setattr(polygon, name, cached)
+    return cached
+
+
 def _line_segments(line: LineString) -> np.ndarray:
     if len(line._coords) < 2:
         return np.empty((0, 4), dtype=np.float64)
@@ -61,7 +71,7 @@ def _line_segments(line: LineString) -> np.ndarray:
 
 def _geometry_segments(geometry) -> np.ndarray:
     if isinstance(geometry, Polygon):
-        return _segments_from_rings(_rings(geometry))
+        return _polygon_segments(geometry)[0]
     if isinstance(geometry, LineString):
         return _line_segments(geometry)
     return np.empty((0, 4), dtype=np.float64)
@@ -301,14 +311,16 @@ def equals(a, b, **kwargs) -> bool:
     return False
 
 
-def _split_parameters(segments, other, params, kinds, along_a):
+def _split_parameters(segments, other, params, kinds, along_a, indices=None):
     result = [{0.0, 1.0} for _ in range(len(segments))]
-    rows, columns = np.nonzero(kinds == 1)
+    if indices is None:
+        indices = (np.nonzero(kinds == 1), np.nonzero(kinds == 2))
+    (rows, columns), collinear = indices
     targets, candidates = (rows, columns) if along_a else (columns, rows)
     for target, row, column in zip(targets, rows, columns):
         result[target].add(float(np.clip(params[row, column], 0.0, 1.0)))
 
-    rows, columns = np.nonzero(kinds == 2)
+    rows, columns = collinear
     targets, candidates = (rows, columns) if along_a else (columns, rows)
     if len(targets):
         selected = segments[targets]
@@ -349,12 +361,15 @@ def _fragments(segments, parameters):
 
 
 def _boundary_fragments(a: Polygon, b: Polygon, operation: str):
-    sa = _segments_from_rings(_rings(a, oriented=True))
-    sb = _segments_from_rings(_rings(b, oriented=True))
-    ts, us, kinds = _lib.segment_intersections(sa, sb)
-    pa = _split_parameters(sa, sb, ts, kinds, True)
-    pb = _split_parameters(sb, sa, us, kinds, False)
-    candidates = np.concatenate((_fragments(sa, pa), _fragments(sb, pb)))
+    sa, _ = _polygon_segments(a, oriented=True)
+    sb, sb_soa = _polygon_segments(b, oriented=True)
+    ts, us, kinds = _lib.segment_intersections_buffers(sa, sb, sb_soa)
+    indices = (np.nonzero(kinds == 1), np.nonzero(kinds == 2))
+    pa = _split_parameters(sa, sb, ts, kinds, True, indices)
+    pb = _split_parameters(sb, sa, us, kinds, False, indices)
+    fragments_a = _fragments(sa, pa)
+    fragments_b = _fragments(sb, pb)
+    candidates = np.concatenate((fragments_a, fragments_b))
     if not len(candidates):
         return np.empty((0, 2, 2)), kinds, sa, sb
     scale = max(1.0, *(abs(v) for v in (*a.bounds, *b.bounds)))
@@ -370,10 +385,15 @@ def _boundary_fragments(a: Polygon, b: Polygon, operation: str):
     probes = np.empty((2 * len(candidates), 2), dtype=np.float64)
     probes[0::2] = midpoints + normals * offsets[:, None]
     probes[1::2] = midpoints - normals * offsets[:, None]
-    la = _location(a, probes)
-    lb = _location(b, probes)
-    inside_a = la == 1
-    inside_b = lb == 1
+    split = 2 * np.count_nonzero(valid[: len(fragments_a)])
+    inside_a = np.empty(2 * len(candidates), dtype=bool)
+    inside_b = np.empty(2 * len(candidates), dtype=bool)
+    inside_a[:split:2] = True
+    inside_a[1:split:2] = False
+    inside_b[:split] = _location(b, probes[:split]) == 1
+    inside_a[split:] = _location(a, probes[split:]) == 1
+    inside_b[split::2] = True
+    inside_b[split + 1 :: 2] = False
     if operation == "intersection":
         truth = inside_a & inside_b
     elif operation == "union":
@@ -439,21 +459,21 @@ def _loops(fragments, scale):
                 break
         if current == keys[0] and len(keys) >= 4:
             ring = np.asarray([points[k] for k in keys[:-1]])
-            if abs(_lib.ring_area(ring)) > tolerance * tolerance:
+            if abs(_lib.ring_area_buffer(ring)) > tolerance * tolerance:
                 loops.append(ring)
     return loops
 
 
 def _assemble(loops):
-    shells = [ring for ring in loops if _lib.ring_area(ring) > 0]
-    holes = [ring for ring in loops if _lib.ring_area(ring) < 0]
+    shells = [ring for ring in loops if _lib.ring_area_buffer(ring) > 0]
+    holes = [ring for ring in loops if _lib.ring_area_buffer(ring) < 0]
     polygons = [Polygon(shell) for shell in shells]
     assignments = [[] for _ in shells]
     for hole in holes:
         candidates = []
         for index, shell in enumerate(shells):
             if _lib.locate_points([shell], hole[:1])[0] != 0:
-                candidates.append((abs(_lib.ring_area(shell)), index))
+                candidates.append((abs(_lib.ring_area_buffer(shell)), index))
         if candidates:
             assignments[min(candidates)[1]].append(hole)
     polygons = [Polygon(shell, assignments[i]) for i, shell in enumerate(shells)]

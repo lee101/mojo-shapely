@@ -70,6 +70,10 @@ def _segments(value, name: str) -> np.ndarray:
 
 def ring_area(coords: np.ndarray) -> float:
     coords = _pairs(coords, "ring coordinates")
+    return ring_area_buffer(coords)
+
+
+def ring_area_buffer(coords: np.ndarray) -> float:
     if len(coords) < 3:
         return 0.0
     return float(lib().msh_ring_area(addr(coords), len(coords)))
@@ -77,6 +81,10 @@ def ring_area(coords: np.ndarray) -> float:
 
 def line_length(coords: np.ndarray, closed: bool = False) -> float:
     coords = _pairs(coords, "line coordinates")
+    return line_length_buffer(coords, closed)
+
+
+def line_length_buffer(coords: np.ndarray, closed: bool = False) -> float:
     if len(coords) < 2:
         return 0.0
     return float(lib().msh_line_length(addr(coords), len(coords), int(closed)))
@@ -119,11 +127,18 @@ def locate_points_buffer(
 def segment_intersections(a: np.ndarray, b: np.ndarray):
     a = _segments(a, "left segments")
     b = _segments(b, "right segments")
-    b_soa = np.ascontiguousarray(b.T)
+    return segment_intersections_buffers(a, b)
+
+
+def segment_intersections_buffers(
+    a: np.ndarray, b: np.ndarray, b_soa: np.ndarray | None = None
+):
+    if b_soa is None:
+        b_soa = np.ascontiguousarray(b.T)
     shape = (len(a), len(b))
     ts = np.empty(shape, dtype=np.float64)
     us = np.empty(shape, dtype=np.float64)
-    kinds = np.empty(shape, dtype=np.int64)
+    kinds = np.empty(shape, dtype=np.uint8)
     if a.size and b.size:
         lib().msh_segment_intersections(
             addr(a), addr(b_soa), addr(ts), addr(us), addr(kinds), len(a), len(b)

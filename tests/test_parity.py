@@ -167,6 +167,7 @@ def test_simd_tails_for_measurement_location_and_segments():
     vertical = np.array([[x, -1.0, x, 3.0] for x in np.linspace(-1, 3, 7)])
     ts, us, kinds = _lib.segment_intersections(horizontal, vertical)
     expected_hits = (vertical[:, 0] >= 0) & (vertical[:, 0] <= 2)
+    assert kinds.dtype == np.uint8
     assert np.all(kinds == expected_hits[None, :])
     assert np.all((ts[kinds == 1] >= 0) & (ts[kinds == 1] <= 1))
     assert np.all((us[kinds == 1] >= 0) & (us[kinds == 1] <= 1))
