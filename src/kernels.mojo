@@ -2,15 +2,11 @@
 
 from std.math import sqrt
 from std.sys.info import simd_width_of
-from max.algorithm import sync_parallelize
 
 comptime Ptr = Pointer[Float64, AnyOrigin[mut=True]]
 comptime IntPtr = Pointer[Int64, AnyOrigin[mut=True]]
 comptime BytePtr = Pointer[UInt8, AnyOrigin[mut=True]]
 comptime W = simd_width_of[DType.float64]()
-comptime LOCATE_PARALLEL_WORK = 1 << 20
-comptime SEGMENT_PARALLEL_WORK = 1 << 18
-comptime PARALLEL_TASKS = 32
 
 
 def p(addr: Int) -> Ptr:
@@ -152,30 +148,12 @@ def msh_locate_points(
     var points = p(points_addr)
     var dst = p(dst_addr)
     var batches = npoints // W
-
-    @__parameter
-    @__copy_capture(coords, offsets, nrings, points, dst)
-    @always_inline
-    def locate_batch(i: Int):
+    for i in range(batches):
         dst.unsafe_store(
             i * W,
             locate_point_batch(coords, offsets, nrings, points, i * W),
         )
 
-    @__parameter
-    @__copy_capture(batches)
-    def locate_task(task: Int):
-        var task_count = min(PARALLEL_TASKS, batches)
-        var start = task * batches // task_count
-        var stop = (task + 1) * batches // task_count
-        for i in range(start, stop):
-            locate_batch(i)
-
-    if npoints * Int(offsets[unsafe_offset=nrings]) >= LOCATE_PARALLEL_WORK:
-        sync_parallelize[locate_task](min(PARALLEL_TASKS, batches))
-    else:
-        for i in range(batches):
-            locate_batch(i)
     for i in range(batches * W, npoints):
         dst[unsafe_offset=i] = Float64(
             locate_point(
@@ -249,6 +227,114 @@ def msh_line_length(coords_addr: Int, n: Int, closed: Int) abi("C") -> Float64:
     return acc
 
 
+
+
+def segment_intersect_row(
+    a: Ptr, b: Ptr, ts: Ptr, us: Ptr, kinds: BytePtr, i: Int, nb: Int
+):
+    var ax = a[unsafe_offset=4 * i]
+    var ay = a[unsafe_offset=4 * i + 1]
+    var bx = a[unsafe_offset=4 * i + 2]
+    var by = a[unsafe_offset=4 * i + 3]
+    var rx = bx - ax
+    var ry = by - ay
+    var j = 0
+    while j + W <= nb:
+        var k = i * nb + j
+        var cx = b.unsafe_load[width=W](j)
+        var cy = b.unsafe_load[width=W](j + nb)
+        var dx = b.unsafe_load[width=W](j + 2 * nb)
+        var dy = b.unsafe_load[width=W](j + 3 * nb)
+        var sx = dx - cx
+        var sy = dy - cy
+        var den = rx * sy - ry * sx
+        var qpx = cx - ax
+        var qpy = cy - ay
+        var scale = 1.0 + abs(rx) + abs(ry) + abs(sx) + abs(sy)
+        var eps = 1.0e-12 * scale
+        var zeros = SIMD[DType.float64, W](0.0)
+        var ones = SIMD[DType.float64, W](1.0)
+        var bbox_miss = (
+            SIMD[DType.float64, W](max(ax, bx)).lt(min(cx, dx))
+            | max(cx, dx).lt(SIMD[DType.float64, W](min(ax, bx)))
+            | SIMD[DType.float64, W](max(ay, by)).lt(min(cy, dy))
+            | max(cy, dy).lt(SIMD[DType.float64, W](min(ay, by)))
+        )
+        var any_bbox_hit = False
+        for lane in range(W):
+            if not Bool(bbox_miss[lane]):
+                any_bbox_hit = True
+        if not any_bbox_hit:
+            ts.unsafe_store(k, zeros)
+            us.unsafe_store(k, zeros)
+            kinds.unsafe_store(k, SIMD[DType.uint8, W](0))
+            j += W
+            continue
+        var nonparallel = abs(den).gt(eps)
+        var collinear = abs(qpx * ry - qpy * rx).le(eps)
+        var tv = (qpx * sy - qpy * sx) / den
+        var uv = (qpx * ry - qpy * rx) / den
+        var hit = (
+            ~bbox_miss
+            & nonparallel
+            & tv.ge(-eps)
+            & tv.le(1.0 + eps)
+            & uv.ge(-eps)
+            & uv.le(1.0 + eps)
+        )
+        ts.unsafe_store(k, hit.select(min(ones, max(zeros, tv)), zeros))
+        us.unsafe_store(k, hit.select(min(ones, max(zeros, uv)), zeros))
+        kinds.unsafe_store(
+            k,
+            hit.select(
+                SIMD[DType.uint8, W](1),
+                ((~bbox_miss) & (~nonparallel) & collinear).select(
+                    SIMD[DType.uint8, W](2), SIMD[DType.uint8, W](0)
+                ),
+            ),
+        )
+        j += W
+    while j < nb:
+        var k = i * nb + j
+        kinds[unsafe_offset=k] = 0
+        ts[unsafe_offset=k] = 0.0
+        us[unsafe_offset=k] = 0.0
+        var cx = b[unsafe_offset=j]
+        var cy = b[unsafe_offset=j + nb]
+        var dx = b[unsafe_offset=j + 2 * nb]
+        var dy = b[unsafe_offset=j + 3 * nb]
+        j += 1
+        if (
+            max(ax, bx) < min(cx, dx)
+            or max(cx, dx) < min(ax, bx)
+            or max(ay, by) < min(cy, dy)
+            or max(cy, dy) < min(ay, by)
+        ):
+            continue
+        var sx = dx - cx
+        var sy = dy - cy
+        var den = rx * sy - ry * sx
+        var qpx = cx - ax
+        var qpy = cy - ay
+        var scale = 1.0 + abs(rx) + abs(ry) + abs(sx) + abs(sy)
+        var eps = 1.0e-12 * scale
+        if abs(den) <= eps:
+            if abs(qpx * ry - qpy * rx) <= eps:
+                kinds[unsafe_offset=k] = 2
+            continue
+        var tv = (qpx * sy - qpy * sx) / den
+        var uv = (qpx * ry - qpy * rx) / den
+        if (
+            tv >= -eps
+            and tv <= 1.0 + eps
+            and uv >= -eps
+            and uv <= 1.0 + eps
+        ):
+            ts[unsafe_offset=k] = min(1.0, max(0.0, tv))
+            us[unsafe_offset=k] = min(1.0, max(0.0, uv))
+            kinds[unsafe_offset=k] = 1
+
+
 @export("msh_segment_intersections")
 def msh_segment_intersections(
     a_addr: Int,
@@ -265,126 +351,9 @@ def msh_segment_intersections(
     var us = p(u_addr)
     var kinds = bp(kind_addr)
 
-    @__parameter
-    @__copy_capture(a, b, ts, us, kinds, nb)
-    @always_inline
-    def intersect_row(i: Int):
-        var ax = a[unsafe_offset=4 * i]
-        var ay = a[unsafe_offset=4 * i + 1]
-        var bx = a[unsafe_offset=4 * i + 2]
-        var by = a[unsafe_offset=4 * i + 3]
-        var rx = bx - ax
-        var ry = by - ay
-        var j = 0
-        while j + W <= nb:
-            var k = i * nb + j
-            var cx = b.unsafe_load[width=W](j)
-            var cy = b.unsafe_load[width=W](j + nb)
-            var dx = b.unsafe_load[width=W](j + 2 * nb)
-            var dy = b.unsafe_load[width=W](j + 3 * nb)
-            var sx = dx - cx
-            var sy = dy - cy
-            var den = rx * sy - ry * sx
-            var qpx = cx - ax
-            var qpy = cy - ay
-            var scale = 1.0 + abs(rx) + abs(ry) + abs(sx) + abs(sy)
-            var eps = 1.0e-12 * scale
-            var zeros = SIMD[DType.float64, W](0.0)
-            var ones = SIMD[DType.float64, W](1.0)
-            var bbox_miss = (
-                SIMD[DType.float64, W](max(ax, bx)).lt(min(cx, dx))
-                | max(cx, dx).lt(SIMD[DType.float64, W](min(ax, bx)))
-                | SIMD[DType.float64, W](max(ay, by)).lt(min(cy, dy))
-                | max(cy, dy).lt(SIMD[DType.float64, W](min(ay, by)))
-            )
-            var any_bbox_hit = False
-            for lane in range(W):
-                if not Bool(bbox_miss[lane]):
-                    any_bbox_hit = True
-            if not any_bbox_hit:
-                ts.unsafe_store(k, zeros)
-                us.unsafe_store(k, zeros)
-                kinds.unsafe_store(k, SIMD[DType.uint8, W](0))
-                j += W
-                continue
-            var nonparallel = abs(den).gt(eps)
-            var collinear = abs(qpx * ry - qpy * rx).le(eps)
-            var tv = (qpx * sy - qpy * sx) / den
-            var uv = (qpx * ry - qpy * rx) / den
-            var hit = (
-                ~bbox_miss
-                & nonparallel
-                & tv.ge(-eps)
-                & tv.le(1.0 + eps)
-                & uv.ge(-eps)
-                & uv.le(1.0 + eps)
-            )
-            ts.unsafe_store(k, hit.select(min(ones, max(zeros, tv)), zeros))
-            us.unsafe_store(k, hit.select(min(ones, max(zeros, uv)), zeros))
-            kinds.unsafe_store(
-                k,
-                hit.select(
-                    SIMD[DType.uint8, W](1),
-                    ((~bbox_miss) & (~nonparallel) & collinear).select(
-                        SIMD[DType.uint8, W](2), SIMD[DType.uint8, W](0)
-                    ),
-                ),
-            )
-            j += W
-        while j < nb:
-            var k = i * nb + j
-            kinds[unsafe_offset=k] = 0
-            ts[unsafe_offset=k] = 0.0
-            us[unsafe_offset=k] = 0.0
-            var cx = b[unsafe_offset=j]
-            var cy = b[unsafe_offset=j + nb]
-            var dx = b[unsafe_offset=j + 2 * nb]
-            var dy = b[unsafe_offset=j + 3 * nb]
-            j += 1
-            if (
-                max(ax, bx) < min(cx, dx)
-                or max(cx, dx) < min(ax, bx)
-                or max(ay, by) < min(cy, dy)
-                or max(cy, dy) < min(ay, by)
-            ):
-                continue
-            var sx = dx - cx
-            var sy = dy - cy
-            var den = rx * sy - ry * sx
-            var qpx = cx - ax
-            var qpy = cy - ay
-            var scale = 1.0 + abs(rx) + abs(ry) + abs(sx) + abs(sy)
-            var eps = 1.0e-12 * scale
-            if abs(den) <= eps:
-                if abs(qpx * ry - qpy * rx) <= eps:
-                    kinds[unsafe_offset=k] = 2
-                continue
-            var tv = (qpx * sy - qpy * sx) / den
-            var uv = (qpx * ry - qpy * rx) / den
-            if (
-                tv >= -eps
-                and tv <= 1.0 + eps
-                and uv >= -eps
-                and uv <= 1.0 + eps
-            ):
-                ts[unsafe_offset=k] = min(1.0, max(0.0, tv))
-                us[unsafe_offset=k] = min(1.0, max(0.0, uv))
-                kinds[unsafe_offset=k] = 1
+    for i in range(na):
+        segment_intersect_row(a, b, ts, us, kinds, i, nb)
 
-    @__parameter
-    @__copy_capture(na)
-    def intersect_task(task: Int):
-        var task_count = min(PARALLEL_TASKS, na)
-        var start = task * na // task_count
-        var stop = (task + 1) * na // task_count
-        for i in range(start, stop):
-            intersect_row(i)
-
-    if na * nb >= SEGMENT_PARALLEL_WORK:
-        sync_parallelize[intersect_task](min(PARALLEL_TASKS, na))
-    else:
-        for i in range(na):
-            intersect_row(i)
 
 
 @export("msh_orient_batch")

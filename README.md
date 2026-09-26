@@ -89,15 +89,21 @@ measurement, and all-pairs segment-intersection kernels. The Python topology
 layer splits polygon edges at intersections, classifies both sides of every
 fragment with the Mojo point locator, and polygonizes the retained directed
 boundary. Float64 measurement, point-location, and segment-pair loops use the
-host SIMD width with scalar remainder loops. Point location and segment-pair
-work use CPU parallelism only above measured size thresholds; smaller calls
-stay serial to avoid dispatch overhead. Polygon coordinate buffers are cached
-and passed across the FFI without a copy.
+host SIMD width with scalar remainder loops. Every kernel is single-threaded:
+Mojo 1.2 removed closure capture, so the point-locator and segment-pair batches
+can no longer be fanned out from inside a `parallelize` body. Segment pairing is
+the one genuinely compute-bound kernel here -- roughly 20 flops per segment pair
+over O(na + nb) resident coordinates, so well clear of the memory-bound band the
+other kernels sit in. It is left serial because Mojo 1.2 offers no way to
+express a state-carrying parallel body. Point location re-reads the whole ring
+for every point and is already SIMD-vectorised across points. Polygon coordinate
+buffers are cached and passed across the FFI without a copy.
 
-There is no GPU path. The available kernels are branch-heavy streaming
-operations below roughly two floating-point operations per byte moved, so GPU
-transfer and launch overhead would outweigh useful work. The project therefore
-keeps these kernels on the CPU.
+There is no GPU path. Point location, measurement, and the segment predicates
+are branch-heavy streaming operations that move far more bytes than they
+compute, and the all-pairs intersection matrix is a single output array far too
+small to amortise a device round trip. The project therefore keeps these
+kernels on the CPU.
 
 ## Benchmarks
 
@@ -112,7 +118,7 @@ These are real results from this checkout:
 | Polygon.intersection, 256 vertices | 3.928 ms | 0.145 ms | 0.04x slower |
 | Polygon.union, 256 vertices | 4.302 ms | 0.091 ms | 0.02x slower |
 
-The SIMD and thresholded parallel point kernel is about seven times faster than
+The SIMD point kernel is about seven times faster than
 GEOS for the 2M-point case on this machine. Geometry-owned measurement and edge
 buffers cross the FFI without validation copies, and polygon edge layouts are
 cached in both AoS and SIMD-friendly SoA form. Boolean operations remain about

@@ -9,8 +9,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 LIB = os.path.join(ROOT, "dist", "libmojo-shapely.so")
 I = ctypes.c_int64
 F = ctypes.c_double
-LOCATE_PARALLEL_WORK = 1 << 20
-SEGMENT_PARALLEL_WORK = 1 << 18
+LOCATE_LARGE_INPUT = 1 << 20
+SEGMENT_LARGE_INPUT = 1 << 18
 
 _SIGNATURES = {
     "msh_locate_points": ([I, I, I, I, I, I], None),

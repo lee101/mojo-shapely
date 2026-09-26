@@ -173,17 +173,17 @@ def test_simd_tails_for_measurement_location_and_segments():
     assert np.all((us[kinds == 1] >= 0) & (us[kinds == 1] <= 1))
 
 
-def test_parallel_thresholds_match_serial_results():
+def test_large_inputs_match_expected_results():
     polygon = msh.box(0, 0, 1, 1)
-    point_count = _lib.LOCATE_PARALLEL_WORK // len(polygon._shell)
+    point_count = _lib.LOCATE_LARGE_INPUT // len(polygon._shell)
     x = np.linspace(-0.5, 1.5, point_count)
     y = np.full(point_count, 0.5)
-    below = msh.contains_xy(polygon, x[:-1], y[:-1])
-    at_threshold = msh.contains_xy(polygon, x, y)
-    assert np.array_equal(below, (x[:-1] > 0) & (x[:-1] < 1))
-    assert np.array_equal(at_threshold, (x > 0) & (x < 1))
+    truncated = msh.contains_xy(polygon, x[:-1], y[:-1])
+    full = msh.contains_xy(polygon, x, y)
+    assert np.array_equal(truncated, (x[:-1] > 0) & (x[:-1] < 1))
+    assert np.array_equal(full, (x > 0) & (x < 1))
 
-    side = int(np.sqrt(_lib.SEGMENT_PARALLEL_WORK))
+    side = int(np.sqrt(_lib.SEGMENT_LARGE_INPUT))
     horizontal = np.column_stack(
         (
             np.zeros(side),
@@ -193,10 +193,10 @@ def test_parallel_thresholds_match_serial_results():
         )
     )
     vertical = np.tile([0.5, -1.0, 0.5, side + 1.0], (side, 1))
-    _, _, below_kinds = _lib.segment_intersections(horizontal[:-1], vertical)
-    _, _, threshold_kinds = _lib.segment_intersections(horizontal, vertical)
-    assert np.all(below_kinds == 1)
-    assert np.all(threshold_kinds == 1)
+    _, _, truncated_kinds = _lib.segment_intersections(horizontal[:-1], vertical)
+    _, _, full_kinds = _lib.segment_intersections(horizontal, vertical)
+    assert np.all(truncated_kinds == 1)
+    assert np.all(full_kinds == 1)
 
 
 @pytest.mark.parametrize(
